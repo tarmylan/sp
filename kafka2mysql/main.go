@@ -94,7 +94,7 @@ func processor(c *cli.Context) error {
 	consumerId := fmt.Sprintf("%v-%v-%v", table_topic, table, trace_tblname)
 	log.Info("consumerId:", consumerId)
 
-	// connect to postgres
+	// connect to mysql
 	db, err := sql.Open("mysql", url)
 	if err != nil {
 		log.Fatal(err)
