@@ -39,7 +39,6 @@ func main() {
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
 				Name: "brokers, b",
-				// TODO fix me
 				//Value: cli.NewStringSlice("172.16.10.222:9092,172.16.10.223:9092,172.16.10.224:9092"),
 				Value: cli.NewStringSlice("172.16.10.222:9092"),
 				Usage: "kafka brokers address",
@@ -62,7 +61,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "trace-tblname",
 				Value: "behavior",
-				Usage: "mysql table name",
+				Usage: "mysql table name, aware of timeformat in golang",
 			},
 			&cli.DurationFlag{
 				Name:  "commit-interval",
@@ -106,9 +105,6 @@ func processor(c *cli.Context) error {
 		log.Fatal(err)
 	}
 
-	//config := sarama.NewConfig()
-	//config.Producer.Return.Successes = false
-	//config.Producer.Return.Errors = false
 	consumer, err := sarama.NewConsumer(brokers, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -198,6 +194,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		log.Fatal(err)
 	}
 
+	// 数量控制
 	handle_count := 0
 
 	startSecs := time.Now().Unix()
@@ -213,9 +210,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 			log.Fatal("error:", err)
 		}
 
-		var values, copies []interface{}
-		values = append(values, value.Id)
-		values = append(values, value.Name)
+		values := []interface{}{value.Id, value.Name}
 
 		sqlStr := "INSERT INTO profile (id, name"
 		valStr := "VALUES(?, ?"
@@ -223,7 +218,6 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		var count int
 		for _, v := range fields {
 			values = append(values, v.Value)
-			copies = append(copies, v.Value)
 			sqlStr += "," + v.Key
 			valStr += ",?"
 			if count > 0 {
@@ -236,7 +230,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		sqlStr += " ON DUPLICATE KEY UPDATE "
 		sqlStr += updStr
 
-		values = append(values, copies...)
+		values = append(values, values[2:]...)
 
 		// update profile
 		if r, err := tx.Exec(sqlStr, values...); err == nil {
@@ -249,6 +243,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		if handle_count > TRANSATION_HANDLE_UNIT {
 			doCommit(tx)
 
+			// reset
 			handle_count = 0
 			tx, err = db.Begin()
 			if err != nil {
