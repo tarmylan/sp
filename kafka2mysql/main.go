@@ -149,8 +149,8 @@ func processor(c *cli.Context) error {
 			behavior := &Behavior{}
 			if err := json.Unmarshal(msg.Value, behavior); err == nil {
 				// pending
-				pending = append(pending, behavior)
 				pending_count++
+				pending = append(pending, behavior)
 				offset = msg.Offset
 			} else {
 				log.Fatal(err)
@@ -158,100 +158,112 @@ func processor(c *cli.Context) error {
 
 			//
 			if pending_count > TRANSATION_HANDLE_UNIT {
-				commit(lastTblName, consumerId, db, pending, offset)
-				pending = pending[:0]
+				err := commit(lastTblName, consumerId, db, pending, offset)
 				pending_count = 0
+				pending = pending[:0]
+				if err != nil {
+					log.Fatal(err)
+				}
 			}
 		case <-commitTicker.C:
-			commit(lastTblName, consumerId, db, pending, offset)
+			err := commit(lastTblName, consumerId, db, pending, offset)
 			pending_count = 0
 			pending = pending[:0]
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }
 
-func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset int64) {
+func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset int64) error {
 	if len(pending) == 0 {
-		return
+		return nil
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	doCommit := func(tx *sql.Tx) {
-		if err := tx.Commit(); err != nil {
-			// tx.Rollback()
-			log.Fatal(err)
-		}
+		return fmt.Errorf("tx begin error %v", err)
 	}
 
 	defer func(tx *sql.Tx) {
 		err := tx.Rollback()
 		if err != sql.ErrTxDone && err != nil {
-			log.Fatal(err)
+			log.Error(err)
+			return
 		}
 	}(tx)
 
 	behavior_sql := "INSERT INTO behavior (char_id, name, action, data) VALUES (?, ?, ?, ?)"
 	stmt, err := tx.Prepare(behavior_sql)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("prepare behavior sql stmt error %v", err)
 	}
 
 	startSecs := time.Now().Unix()
 
-	for _, value := range pending {
+	for _, v := range pending {
 		// behavior records
-		if r, err := stmt.Exec(value.Id, value.Name, value.Action, string(value.Data)); err == nil {
-		} else {
-			log.Fatal(r, err)
+		if _, err := stmt.Exec(v.Id, v.Name, v.Action, string(v.Data)); err != nil {
+			return fmt.Errorf("behavior record %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
 		}
 
-		var fields []Field
-		err := json.Unmarshal(value.Data, &fields)
+		sqlStr, values, err := convertBehavior2Sql(v)
 		if err != nil {
-			log.Fatal("error:", err)
+			return fmt.Errorf("convertBehavior2Sql %v", err)
 		}
 
-		// prifile fields
-		values := []interface{}{value.Id, value.Name}
-
-		sqlStr := "INSERT INTO profile (id, name"
-		valStr := "VALUES(?, ?"
-		updStr := ""
-		var count int
-		for _, v := range fields {
-			values = append(values, v.Value)
-			sqlStr += "," + v.Key
-			valStr += ",?"
-			if count > 0 {
-				updStr += ","
-			}
-			updStr += v.Key + "=?"
-			count++
-		}
-		sqlStr += ") " + valStr + ")"
-		sqlStr += " ON DUPLICATE KEY UPDATE "
-		sqlStr += updStr
-
-		values = append(values, values[2:]...)
 		// update profile
-		if r, err := tx.Exec(sqlStr, values...); err == nil {
-		} else {
-			log.Fatal(r, err)
+		if _, err := tx.Exec(sqlStr, values...); err != nil {
+			return fmt.Errorf("update profile %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
 		}
 	}
 
 	// write offset
-	if r, err := tx.Exec("INSERT INTO kafka_offset (id, offset) VALUES (?, ?) ON DUPLICATE KEY UPDATE offset=?", consumerId, offset, offset); err != nil {
-		log.Fatal(r, err)
+	if _, err := tx.Exec("INSERT INTO kafka_offset (id, offset) VALUES (?, ?) ON DUPLICATE KEY UPDATE offset=?",
+		consumerId, offset, offset); err != nil {
+		return fmt.Errorf("update kafka_offset %v, %v error %v", consumerId, offset, err)
 	}
 
 	// commit the transation
-	doCommit(tx)
+	if err := tx.Commit(); err != nil {
+		// tx.Rollback()
+		return fmt.Errorf("mysql commit error %v", err)
+	}
 
 	endSecs := time.Now().Unix()
 	log.Infof("database table: %v, consumer id: %v, topic offset: %v, written: %v, cost:%vs", tblname, consumerId, offset, len(pending), endSecs-startSecs)
+	return nil
+}
+
+func convertBehavior2Sql(v *Behavior) (sqlStr string, values []interface{}, err error) {
+	var fields []Field
+	err = json.Unmarshal(v.Data, &fields)
+	if err != nil {
+		return
+	}
+
+	// prifile fields
+	values = append(values, v.Id, v.Name)
+
+	sqlStr = "INSERT INTO profile (id, name"
+	valStr := "VALUES(?, ?"
+	updStr := ""
+	var count int
+	for _, v := range fields {
+		values = append(values, v.Value)
+		sqlStr += "," + v.Key
+		valStr += ",?"
+		if count > 0 {
+			updStr += ","
+		}
+		updStr += v.Key + "=?"
+		count++
+	}
+	sqlStr += ") " + valStr + ")"
+	sqlStr += " ON DUPLICATE KEY UPDATE "
+	sqlStr += updStr
+
+	values = append(values, values[2:]...)
+	return
 }
