@@ -138,10 +138,11 @@ func processor(c *cli.Context) error {
 
 	lastTblName := trace_tblname
 	log.Info("started")
+
 	commitTicker := time.NewTicker(commit_interval)
 
 	var pending []*Behavior
-
+	var pending_count int
 	for {
 		select {
 		case msg := <-tableConsumer.Messages():
@@ -149,12 +150,21 @@ func processor(c *cli.Context) error {
 			if err := json.Unmarshal(msg.Value, behavior); err == nil {
 				// pending
 				pending = append(pending, behavior)
+				pending_count++
 				offset = msg.Offset
 			} else {
 				log.Fatal(err)
 			}
+
+			//
+			if pending_count > TRANSATION_HANDLE_UNIT {
+				commit(lastTblName, consumerId, db, pending, offset)
+				pending = pending[:0]
+				pending_count = 0
+			}
 		case <-commitTicker.C:
 			commit(lastTblName, consumerId, db, pending, offset)
+			pending_count = 0
 			pending = pending[:0]
 		}
 	}
@@ -165,11 +175,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		return
 	}
 
-	var err error
-	var tx *sql.Tx
-	var stmt *sql.Stmt
-
-	tx, err = db.Begin()
+	tx, err := db.Begin()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -189,16 +195,15 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 	}(tx)
 
 	behavior_sql := "INSERT INTO behavior (char_id, name, action, data) VALUES (?, ?, ?, ?)"
-	stmt, err = tx.Prepare(behavior_sql)
+	stmt, err := tx.Prepare(behavior_sql)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// 数量控制
-	handle_count := 0
-
 	startSecs := time.Now().Unix()
+
 	for _, value := range pending {
+		// behavior records
 		if r, err := stmt.Exec(value.Id, value.Name, value.Action, string(value.Data)); err == nil {
 		} else {
 			log.Fatal(r, err)
@@ -210,6 +215,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 			log.Fatal("error:", err)
 		}
 
+		// prifile fields
 		values := []interface{}{value.Id, value.Name}
 
 		sqlStr := "INSERT INTO profile (id, name"
@@ -231,29 +237,10 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		sqlStr += updStr
 
 		values = append(values, values[2:]...)
-
 		// update profile
 		if r, err := tx.Exec(sqlStr, values...); err == nil {
 		} else {
 			log.Fatal(r, err)
-		}
-
-		handle_count += 2
-
-		if handle_count > TRANSATION_HANDLE_UNIT {
-			doCommit(tx)
-
-			// reset
-			handle_count = 0
-			tx, err = db.Begin()
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			stmt, err = tx.Prepare(behavior_sql)
-			if err != nil {
-				log.Fatal(err)
-			}
 		}
 	}
 
