@@ -200,7 +200,7 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		return fmt.Errorf("prepare behavior sql stmt error %v", err)
 	}
 
-	startSecs := time.Now().Unix()
+	startTime := time.Now()
 
 	for _, v := range pending {
 		// behavior records
@@ -231,8 +231,8 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		return fmt.Errorf("mysql commit error %v", err)
 	}
 
-	endSecs := time.Now().Unix()
-	log.Infof("database table: %v, consumer id: %v, topic offset: %v, written: %v, cost:%vs", tblname, consumerId, offset, len(pending), endSecs-startSecs)
+	elapsed := time.Now().Sub(startTime)
+	log.Infof("database table: %v, consumer id: %v, topic offset: %v, written: %v, cost:%vs", tblname, consumerId, offset, len(pending), elapsed)
 	return nil
 }
 
