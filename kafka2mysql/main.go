@@ -38,9 +38,8 @@ func main() {
 		Version: "0.1",
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
-				Name: "brokers, b",
-				//Value: cli.NewStringSlice("172.16.10.222:9092,172.16.10.223:9092,172.16.10.224:9092"),
-				Value: cli.NewStringSlice("172.16.10.222:9092"),
+				Name:  "brokers, b",
+				Value: cli.NewStringSlice("172.16.10.222:9092", "172.16.10.223:9092", "172.16.10.224:9092"),
 				Usage: "kafka brokers address",
 			},
 			&cli.StringFlag{
@@ -119,7 +118,7 @@ func processor(c *cli.Context) error {
 	// read offset
 	offset := sarama.OffsetOldest
 	err = db.QueryRow("SELECT offset FROM kafka_offset WHERE id = ? LIMIT 1", consumerId).Scan(&offset)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		log.Fatal(err)
 	}
 
@@ -157,7 +156,7 @@ func processor(c *cli.Context) error {
 			}
 
 			//
-			if pending_count > TRANSATION_HANDLE_UNIT {
+			if pending_count >= TRANSATION_HANDLE_UNIT {
 				err := commit(lastTblName, consumerId, db, pending, offset)
 				pending_count = 0
 				pending = pending[:0]
@@ -194,27 +193,36 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 		}
 	}(tx)
 
-	behavior_sql := "INSERT INTO behavior (char_id, name, action, data) VALUES (?, ?, ?, ?)"
-	stmt, err := tx.Prepare(behavior_sql)
-	if err != nil {
-		return fmt.Errorf("prepare behavior sql stmt error %v", err)
-	}
+	/*
+		behavior_sql := "INSERT INTO behavior (char_id, name, action, data) VALUES (?, ?, ?, ?)"
+		stmt, err := tx.Prepare(behavior_sql)
+		if err != nil {
+			return fmt.Errorf("prepare behavior sql stmt error %v", err)
+		}
+	*/
 
 	startTime := time.Now()
-
 	for _, v := range pending {
 		// behavior records
-		if _, err := stmt.Exec(v.Id, v.Name, v.Action, string(v.Data)); err != nil {
-			return fmt.Errorf("behavior record %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
-		}
-
-		sqlStr, values, err := convertBehavior2Sql(v)
+		/*
+			if _, err := stmt.Exec(v.Id, v.Name, v.Action, string(v.Data)); err != nil {
+				return fmt.Errorf("behavior record %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
+			}
+		*/
+		insertSql, updateSql, valuesSql, values, err := convertFields(v)
 		if err != nil {
-			return fmt.Errorf("convertBehavior2Sql %v", err)
+			return fmt.Errorf("convertFields Error %v", err)
 		}
 
-		// update profile
-		if _, err := tx.Exec(sqlStr, values...); err != nil {
+		// behavior insert
+		sqlStr, fieldValues := behavior2Sql(v, insertSql, updateSql, valuesSql, values)
+		if _, err := tx.Exec(sqlStr, fieldValues...); err != nil {
+			return fmt.Errorf("insert behavior %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
+		}
+
+		// profile update
+		sqlStr, fieldValues = behavior2ProfileSql(v, insertSql, updateSql, valuesSql, values)
+		if _, err := tx.Exec(sqlStr, fieldValues...); err != nil {
 			return fmt.Errorf("update profile %v, %v, %v error %v", v.Id, v.Name, v.Action, err)
 		}
 	}
@@ -232,38 +240,60 @@ func commit(tblname, consumerId string, db *sql.DB, pending []*Behavior, offset 
 	}
 
 	elapsed := time.Now().Sub(startTime)
-	log.Infof("database table: %v, consumer id: %v, topic offset: %v, written: %v, cost:%vs", tblname, consumerId, offset, len(pending), elapsed)
+	log.Infof("database table: %v, consumer id: %v, topic offset: %v, written: %v, cost:%v", tblname, consumerId, offset, len(pending), elapsed)
 	return nil
 }
 
-func convertBehavior2Sql(v *Behavior) (sqlStr string, values []interface{}, err error) {
+func behavior2ProfileSql(v *Behavior, insertSql, updateSql, valuesSql string, values []interface{}) (sqlStr string, fieldValues []interface{}) {
+	sqlStr = "INSERT INTO profile (id, name"
+	sqlStr += insertSql
+
+	valStr := "VALUES(?, ?"
+	valStr += valuesSql
+	sqlStr += ") " + valStr + ")"
+
+	// update
+	sqlStr += " ON DUPLICATE KEY UPDATE "
+	sqlStr += updateSql
+
+	fieldValues = []interface{}{v.Id, v.Name}
+	fieldValues = append(fieldValues, values...)
+
+	// update
+	fieldValues = append(fieldValues, values...)
+	return
+}
+
+func behavior2Sql(v *Behavior, insertSql, updateSql, valuesSql string, values []interface{}) (sqlStr string, fieldValues []interface{}) {
+	sqlStr = "INSERT INTO behavior (char_id, name, action, trace_at"
+	sqlStr += insertSql
+
+	valStr := "VALUES(?, ?, ?, ?"
+	valStr += valuesSql
+	sqlStr += ") " + valStr + ")"
+
+	fieldValues = []interface{}{v.Id, v.Name, v.Action, v.TraceAt}
+	fieldValues = append(fieldValues, values...)
+	return
+}
+
+func convertFields(v *Behavior) (insertSql, updateSql, valuesSql string, values []interface{}, err error) {
 	var fields []Field
 	err = json.Unmarshal(v.Data, &fields)
 	if err != nil {
 		return
 	}
 
-	// prifile fields
-	values = append(values, v.Id, v.Name)
-
-	sqlStr = "INSERT INTO profile (id, name"
-	valStr := "VALUES(?, ?"
-	updStr := ""
 	var count int
 	for _, v := range fields {
 		values = append(values, v.Value)
-		sqlStr += "," + v.Key
-		valStr += ",?"
+		insertSql += "," + v.Key
+		valuesSql += ",?"
 		if count > 0 {
-			updStr += ","
+			updateSql += ","
 		}
-		updStr += v.Key + "=?"
+		updateSql += v.Key + "=?"
 		count++
 	}
-	sqlStr += ") " + valStr + ")"
-	sqlStr += " ON DUPLICATE KEY UPDATE "
-	sqlStr += updStr
-
-	values = append(values, values[2:]...)
 	return
 }
