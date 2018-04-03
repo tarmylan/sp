@@ -65,7 +65,12 @@ func main() {
 			&cli.DurationFlag{
 				Name:  "commit-interval",
 				Value: time.Second,
-				Usage: "interval for committing pending data to psql",
+				Usage: "interval for committing pending data to mysql",
+			},
+			&cli.DurationFlag{
+				Name:  "ping-interval",
+				Value: time.Minute,
+				Usage: "interval for pinging to mysql to avoid being closed by the mysql server after long-time idle; check mysql my.conf for interactive_timeout or wait_timeout",
 			},
 		},
 		Action: processor,
@@ -80,6 +85,7 @@ func processor(c *cli.Context) error {
 	url := c.String("url")
 	trace_tblname := c.String("trace-tblname")
 	commit_interval := c.Duration("commit-interval")
+	ping_interval := c.Duration("ping-interval")
 
 	log.Info("brokers:", brokers)
 	log.Info("table-topic:", table_topic)
@@ -139,6 +145,9 @@ func processor(c *cli.Context) error {
 	log.Info("started")
 
 	commitTicker := time.NewTicker(commit_interval)
+	commitTicker.Stop()
+	pingTicker := time.NewTicker(ping_interval)
+	pingTicker.Stop()
 
 	var pending []*Behavior
 	var pending_count int
@@ -170,6 +179,11 @@ func processor(c *cli.Context) error {
 			pending = pending[:0]
 			if err != nil {
 				log.Fatal(err)
+			}
+		case <-pingTicker.C:
+			err := db.Ping()
+			if err != nil {
+				log.Fatalf("Ping mysql error: %v", err)
 			}
 		}
 	}
