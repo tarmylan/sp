@@ -54,7 +54,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:  "url",
-				Value: "ubuntu:123456@tcp(172.16.10.212)/game_monitor",
+				Value: "ubuntu:123456@tcp(172.16.10.212)/game_monitor?charset=utf8mb4",
 				Usage: "mysql url",
 			},
 			&cli.StringFlag{
@@ -104,11 +104,6 @@ func processor(c *cli.Context) error {
 		log.Fatal(err)
 	}
 	defer db.Close()
-
-	err = db.Ping()
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	consumer, err := sarama.NewConsumer(brokers, nil)
 	if err != nil {
